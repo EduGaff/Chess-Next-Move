@@ -1,0 +1,5 @@
+{
+  "name": "Chess Next Move",
+  "description": "AI-powered chess analyzer that converts board screenshots to FEN and provides Stockfish engine evaluations.",
+  "requestFramePermissions": []
+}
