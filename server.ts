@@ -1,7 +1,7 @@
 import express from "express";
 import multer from "multer";
 import cors from "cors";
-import { GoogleGenAI, Type } from "@google/genai";
+import { Client } from "@gradio/client";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
@@ -24,9 +24,8 @@ app.get("/api/health", (req, res) => {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-
-// Vision endpoint using internal Python Microservice
+// Removed Gemini config
+// Vision endpoint using external Hugging Face PyTorch ML API
 app.post("/api/vision/fen", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) {
@@ -35,34 +34,44 @@ app.post("/api/vision/fen", upload.single("image"), async (req, res) => {
 
     const sideToMove = req.body.sideToMove || "w";
 
-    const formData = new FormData();
-    // In Node 18+, we use the global Blob constructor directly
-    const fileBlob = new Blob([req.file.buffer], { type: req.file.mimetype });
-    formData.append('image', fileBlob, 'board.png');
-    formData.append('sideToMove', sideToMove);
+    // In Node 18+, we use the global Blob constructor directly for Gradio
+    const fileBlob = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
 
-    const response = await fetch('http://127.0.0.1:5000/process', {
-      method: 'POST',
-      body: formData,
+    console.log("Connecting to Hugging Face Gradio Space...");
+    const client = await Client.connect("salominavina/chessboard-recognizer");
+
+    console.log("Predicting FEN via PyTorch CNN...");
+    const result = await client.predict("/predict", {
+      image: fileBlob,
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Python Vision Service Error:", errorText);
-      throw new Error(`Vision Service failed with status ${response.status}`);
+    // Gradio returns an object with a data array.
+    const rawOutput = (result.data as any)[0] as string;
+
+    if (!rawOutput) {
+      throw new Error("No output received from Hugging Face API");
     }
 
-    const data = await response.json();
-    const fen = data.fen?.trim();
+    // The output is Markdown containing the FEN and Analysis Links.
+    // Example: "Output FEN: **rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR** w KQkq..."
+    // We strictly extract just the board state notation using Regex.
+    const fenMatch = rawOutput.match(/([pnbrqkPNBRQK1-8]+\/){7}[pnbrqkPNBRQK1-8]+/);
 
-    if (!fen) {
-      throw new Error("Could not detect FEN from image");
+    if (!fenMatch) {
+      console.error("Gradio Raw Output:", rawOutput);
+      throw new Error("Could not parse FEN from Hugging Face prediction");
     }
 
-    res.json({ fen });
+    const boardState = fenMatch[0];
+
+    // Append the user's selected side to move and default castling/move numbers
+    // This strictly ensures the Stockfish engine receives a valid and complete FEN
+    const finalFen = `${boardState} ${sideToMove} KQkq - 0 1`;
+
+    res.json({ fen: finalFen });
   } catch (error: any) {
     console.error("Vision Error:", error);
-    res.status(500).json({ error: error.message || "Failed to process image" });
+    res.status(500).json({ error: error.message || "Failed to process image via ML API" });
   }
 });
 
