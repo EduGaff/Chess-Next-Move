@@ -34,22 +34,41 @@ app.post("/api/vision/fen", upload.single("image"), async (req, res) => {
 
     const sideToMove = req.body.sideToMove || "w";
 
-    // In Node 18+, we use the global Blob constructor directly for Gradio
-    const fileBlob = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+    // Write buffer to a temporary file so Gradio processes the extension correctly
+    const { handle_file } = await import("@gradio/client");
+    const os = await import("os");
+    const ext = req.file.mimetype.split("/")[1] || "jpeg";
+    const tempFilePath = path.join(os.tmpdir(), `chess_upload_${Date.now()}.${ext}`);
+
+    fs.writeFileSync(tempFilePath, req.file.buffer);
 
     console.log("Connecting to Hugging Face Gradio Space...");
     const client = await Client.connect("salominavina/chessboard-recognizer");
 
     console.log("Predicting FEN via PyTorch CNN...");
-    const result = await client.predict("/predict", {
-      image: fileBlob,
-    });
+    let result;
+    try {
+      result = await client.predict("/predict", {
+        image: handle_file(tempFilePath),
+      });
+    } finally {
+      // Always clean up the temp file
+      if (fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+    }
 
     // Gradio returns an object with a data array.
     const rawOutput = (result.data as any)[0] as string;
 
     if (!rawOutput) {
       throw new Error("No output received from Hugging Face API");
+    }
+
+    // Check if the AI returned a clear error message (e.g., "**Error:** Failed to detect a valid chessboard")
+    if (rawOutput.includes("Error:") || rawOutput.includes("**Error:**")) {
+      const cleanError = rawOutput.replace(/\*\*/g, "").trim();
+      throw new Error(`AI Model Error: ${cleanError}`);
     }
 
     // The output is Markdown containing the FEN and Analysis Links.
@@ -59,7 +78,7 @@ app.post("/api/vision/fen", upload.single("image"), async (req, res) => {
 
     if (!fenMatch) {
       console.error("Gradio Raw Output:", rawOutput);
-      throw new Error("Could not parse FEN from Hugging Face prediction");
+      throw new Error("Could not parse FEN from Hugging Face prediction. Response was: " + rawOutput);
     }
 
     const boardState = fenMatch[0];
